@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# Recommendation system: ML service (Python) + public API (Next.js)
+#
+#   docker compose up --build -d      # start (first build takes a few minutes)
+#   docker compose logs -f            # follow logs
+#   docker compose down               # stop (keeps the trained model volume)
+#
+# PostgreSQL comes from the shoppingwebsite project on host port 5432, like
+# DataSqlAnalysis: containers reach it through host.docker.internal.
+# Settings come from .env (LLM_PROVIDER, ANTHROPIC_API_KEY, RECOMMENDATION_COUNT, ...).
+# ---------------------------------------------------------------------------
+
+services:
+
+  # Python FastAPI: XGBoost scoring + LLM rerank (internal, but published for debugging)
+  ml-service:
+    build: ./ml-service
+    env_file: .env
+    environment:
+      POSTGRES_HOST: host.docker.internal
+      # Used when LLM_PROVIDER=ollama. Default: Ollama running natively on this machine.
+      # For an Ollama server elsewhere on the network set OLLAMA_BASE_URL_DOCKER in .env.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL_DOCKER:-http://host.docker.internal:11434}
+      MODEL_DIR: /app/artifacts
+    volumes:
+      - ml_artifacts:/app/artifacts  # trained model survives restarts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8001:8001"
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health | grep -q '\"ready\":true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Next.js public API: POST /api/recommendations (called by the Angular checkout page)
+  api:
+    build: ./api
+    # no env_file: this container does not need the Anthropic key or DB password
+    environment:
+      ML_SERVICE_URL: http://ml-service:8001
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:4200,http://localhost:8080}
+      MAX_RECOMMENDATION_COUNT: ${MAX_RECOMMENDATION_COUNT:-20}
+      UPSTREAM_TIMEOUT_SECONDS: ${UPSTREAM_TIMEOUT_SECONDS:-120}
+    ports:
+      - "3001:3001"
+    depends_on:
+      ml-service:
+        condition: service_healthy
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/api/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  ml_artifacts:
